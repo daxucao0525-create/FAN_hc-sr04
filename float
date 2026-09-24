@@ -1,0 +1,117 @@
+// 定义 HC-SR04 引脚
+const int trigPin = 2;
+const int echoPin = 3;
+
+// 定义风扇 PWM 引脚
+const int fanPwmPin = 9; 
+
+// 控制的距离范围（单位：厘米）
+const int minDistance = 10;   
+const int maxDistance = 120;  
+
+// --- 风速范围参数 ---
+const int maxGentlePwm = 150;  // 近距离时的最大基础风档
+const int minGentlePwm = 35;   // 远距离时的最低维持风档（需大于风扇起动电压）
+
+// --- 状态判断与水纹变量 ---
+int lastDistance = 0;          
+unsigned long stableStartTime = 0; 
+const int stabilityThreshold = 3;  
+const unsigned long stableDelay = 1200; 
+
+// --- 随机水纹与自然风参数 ---
+float waveAngle = 0.0; 
+float waveSpeed = 0.015;        // 基础波浪速度
+float smoothedPwm = 35.0;       // 低通滤波平滑值
+float randomFactor = 0.0;       // 随机风力因子
+unsigned long lastRandomTime = 0; // 上次改变随机风力的时间
+
+void setup() {
+  Serial.begin(9600);
+  pinMode(trigPin, OUTPUT);
+  pinMode(echoPin, INPUT);
+  pinMode(fanPwmPin, OUTPUT);
+  
+  // 使用未连接的模拟引脚悬空噪音初始化随机种子
+  randomSeed(analogRead(A0)); 
+}
+
+void loop() {
+  // 1. 读取超声波距离
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(2);
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigPin, LOW);
+  
+  long duration = pulseIn(echoPin, HIGH, 30000); 
+  int currentDistance = duration * 0.034 / 2; 
+  
+  if (currentDistance <= 0 || currentDistance > 200) {
+    currentDistance = maxDistance;
+  }
+
+  // 2. 判断静止状态
+  if (abs(currentDistance - lastDistance) <= stabilityThreshold) {
+    if (stableStartTime == 0) stableStartTime = millis(); 
+  } else {
+    stableStartTime = 0;
+    waveAngle = 0.0; // 重新移动时重置相位
+  }
+  
+  lastDistance = currentDistance; 
+
+  int targetPwm = 0;
+
+  // 3. 状态控制
+  if (stableStartTime != 0 && (millis() - stableStartTime > stableDelay)) {
+    // 【自然随机水纹模式】
+    int baseDist = constrain(currentDistance, minDistance, maxDistance);
+    int basePwm = map(baseDist, minDistance, maxDistance, maxGentlePwm, minGentlePwm); 
+    
+    // 定时（每 1.5 ~ 3 秒）更新一次随机风力偏置，模拟自然阵风的强弱变化
+    if (millis() - lastRandomTime > random(1500, 3000)) {
+      randomFactor = random(-15, 20); // 随机产生 -15 到 +20 的风力偏移
+      waveSpeed = random(10, 25) / 1000.0; // 随机微调呼吸节奏 (0.010 ~ 0.025)
+      lastRandomTime = millis();
+    }
+    
+    // 波动计算：主正弦波 (±30) + 随机阵风偏置 (±20)
+    int mainWave = sin(waveAngle) * 30;
+    int totalOffset = mainWave + randomFactor;
+    
+    // 限制最高和最低风速
+    targetPwm = constrain(basePwm + totalOffset, 20, 160);
+    
+    // 累加正弦波角度
+    waveAngle += waveSpeed; 
+    if (waveAngle >= 6.283185) { 
+      waveAngle -= 6.283185; 
+    }
+
+    Serial.print("[NATURAL_WAVE] ");
+  } else {
+    // 【微风追踪模式】
+    int constrainedDist = constrain(currentDistance, minDistance, maxDistance);
+    targetPwm = map(constrainedDist, minDistance, maxDistance, maxGentlePwm, minGentlePwm);
+    
+    Serial.print("[GENTLE_MOVE] ");
+  }
+
+  // 4. 低通滤波（Simulated Inertia）
+  // 即使 targetPwm 有随机跳变，smoothedPwm 也会让风扇平滑过渡，消去机械阶跃感
+  smoothedPwm = smoothedPwm + (targetPwm - smoothedPwm) * 0.06;
+
+  // 5. 执行输出
+  analogWrite(fanPwmPin, (int)smoothedPwm);
+  
+  // 6. 打印调试信息
+  Serial.print("Dist: ");
+  Serial.print(currentDistance);
+  Serial.print("cm\t TargetPWM: ");
+  Serial.print(targetPwm);
+  Serial.print("\t OutPWM: ");
+  Serial.println((int)smoothedPwm);
+  
+  delay(50); 
+}
